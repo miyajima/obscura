@@ -54,7 +54,10 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
             Ok(json!({ "targetInfos": targets }))
         }
         "createTarget" => {
-            let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("about:blank");
+            let url = params
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("about:blank");
             let page_id = ctx.create_page();
             let session_id = format!("{}-session", page_id);
 
@@ -105,10 +108,13 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
             Ok(json!({ "targetId": page_id }))
         }
         "attachToTarget" => {
-            let target_id = params.get("targetId").and_then(|v| v.as_str())
+            let target_id = params
+                .get("targetId")
+                .and_then(|v| v.as_str())
                 .ok_or("targetId required")?;
             let session_id = format!("{}-session", target_id);
-            ctx.sessions.insert(session_id.clone(), target_id.to_string());
+            ctx.sessions
+                .insert(session_id.clone(), target_id.to_string());
 
             if let Some(page) = ctx.get_page(target_id) {
                 ctx.pending_events.push(CdpEvent::new(
@@ -131,7 +137,9 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
             Ok(json!({ "sessionId": session_id }))
         }
         "closeTarget" => {
-            let target_id = params.get("targetId").and_then(|v| v.as_str())
+            let target_id = params
+                .get("targetId")
+                .and_then(|v| v.as_str())
                 .ok_or("targetId required")?;
             let session_id = format!("{}-session", target_id);
 
@@ -150,10 +158,61 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
             ctx.remove_page(target_id);
             Ok(json!({ "success": true }))
         }
-        "setAutoAttach" => Ok(json!({})),
-        "getBrowserContexts" => {
-            Ok(json!({ "browserContextIds": [ctx.default_context.id] }))
+        "setAutoAttach" => {
+            if ctx.pages.is_empty() {
+                ctx.create_page();
+            }
+
+            let unattached_pages: Vec<_> = ctx
+                .pages
+                .iter()
+                .filter(|page| !ctx.sessions.values().any(|page_id| page_id == &page.id))
+                .map(|page| {
+                    (
+                        page.id.clone(),
+                        page.title.clone(),
+                        page.url_string(),
+                        page.context.id.clone(),
+                    )
+                })
+                .collect();
+
+            for (page_id, title, url, context_id) in unattached_pages {
+                let session_id = format!("{}-session", page_id);
+                ctx.sessions.insert(session_id.clone(), page_id.clone());
+                ctx.pending_events.push(CdpEvent::new(
+                    "Target.targetCreated",
+                    json!({
+                        "targetInfo": {
+                            "targetId": page_id,
+                            "type": "page",
+                            "title": title,
+                            "url": url,
+                            "attached": false,
+                            "browserContextId": context_id,
+                        }
+                    }),
+                ));
+                ctx.pending_events.push(CdpEvent::new(
+                    "Target.attachedToTarget",
+                    json!({
+                        "sessionId": session_id,
+                        "targetInfo": {
+                            "targetId": page_id,
+                            "type": "page",
+                            "title": title,
+                            "url": url,
+                            "attached": true,
+                            "browserContextId": context_id,
+                        },
+                        "waitingForDebugger": false,
+                    }),
+                ));
+            }
+
+            Ok(json!({}))
         }
+        "getBrowserContexts" => Ok(json!({ "browserContextIds": [ctx.default_context.id] })),
         "createBrowserContext" => {
             ctx.default_context.cookie_jar.clear();
             Ok(json!({ "browserContextId": ctx.default_context.id }))
@@ -178,17 +237,15 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
                         }
                     }))
                 }
-                None => {
-                    Ok(json!({
-                        "targetInfo": {
-                            "targetId": "browser",
-                            "type": "browser",
-                            "title": "",
-                            "url": "",
-                            "attached": true,
-                        }
-                    }))
-                }
+                None => Ok(json!({
+                    "targetInfo": {
+                        "targetId": "browser",
+                        "type": "browser",
+                        "title": "",
+                        "url": "",
+                        "attached": true,
+                    }
+                })),
             }
         }
         _ => Err(format!("Unknown Target method: {}", method)),
