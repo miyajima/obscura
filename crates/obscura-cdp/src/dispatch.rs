@@ -120,7 +120,10 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         "Input" => domains::input::handle(method, &req.params, ctx, &req.session_id).await,
         "Storage" => domains::storage::handle(method, &req.params, ctx, &req.session_id).await,
         "LP" => domains::lp::handle(method, &req.params, ctx, &req.session_id).await,
-        "Emulation" | "Log" | "Performance" | "Security" | "CSS" | "Accessibility"
+        "Accessibility" => {
+            domains::accessibility::handle(method, &req.params, ctx, &req.session_id).await
+        }
+        "Emulation" | "Log" | "Performance" | "Security" | "CSS"
         | "ServiceWorker" | "Inspector" | "Debugger" | "Profiler" | "HeapProfiler" | "Overlay" => {
             Ok(json!({}))
         }

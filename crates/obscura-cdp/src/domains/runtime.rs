@@ -239,13 +239,19 @@ fn try_playwright_selector_call(
         return None;
     }
 
+    let expression_text = arguments
+        .get(3)
+        .and_then(|arg| arg.get("value"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let callback_text = arguments
         .get(6)
         .and_then(|arg| arg.get("value"))
         .and_then(|task| serialized_prop(task, "callbackText"))
-        .and_then(|v| v.as_str())?;
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
-    if callback_text == "(r) => ({ log: r.log, success: r.success })" {
+    if expression_text == "(r) => ({ log: r.log, success: r.success })" {
         let oid = arguments
             .last()
             .and_then(|arg| arg.get("objectId"))
@@ -256,6 +262,47 @@ fn try_playwright_selector_call(
             "className": "Object",
             "description": "Object",
             "value": stored
+        }));
+    }
+
+    if expression_text == "(r) => r.element" {
+        let oid = arguments
+            .last()
+            .and_then(|arg| arg.get("objectId"))
+            .and_then(|v| v.as_str())?;
+        let selector = selector_from_cached_oid(oid)?;
+        let node_id = ctx
+            .get_session_page(session_id)
+            .and_then(|page| {
+                page.with_dom(|dom| {
+                    if selector == ":root" {
+                        dom.children(dom.document())
+                            .into_iter()
+                            .find(|id| dom.get_node(*id).map(|n| n.is_element()).unwrap_or(false))
+                    } else {
+                        dom.query_selector(&selector).ok().flatten()
+                    }
+                })
+            })
+            .flatten()?;
+        return Some(json!({
+            "type": "object",
+            "subtype": "node",
+            "className": "HTMLElement",
+            "description": selector,
+            "objectId": format!("node-{}", node_id.index())
+        }));
+    }
+
+    if expression_text.contains("ariaSnapshot") || expression_text.contains("generateAriaTree") {
+        let snapshot = ctx
+            .get_session_page(session_id)
+            .and_then(|page| crate::domains::accessibility::aria_snapshot_for_page(page, ":root"))
+            .unwrap_or_default();
+        return Some(json!({
+            "type": "string",
+            "value": snapshot,
+            "description": snapshot
         }));
     }
 
@@ -276,7 +323,7 @@ fn try_playwright_selector_call(
         })
         .flatten();
 
-    if callback_text.contains("querySelectorAll") && !return_by_value {
+    if expression_text.contains("querySelectorAll") && !return_by_value {
         let log = text
             .as_ref()
             .map(|_| format!("  locator resolved to {}", selector))
@@ -303,7 +350,7 @@ fn try_playwright_selector_call(
         }));
     }
 
-    if !callback_text.contains("element.textContent") {
+    if !callback_text.contains("element.textContent") && !expression_text.contains("element.textContent") {
         return None;
     }
 
@@ -342,6 +389,15 @@ fn extract_serialized_css_selector(task: &Value) -> Option<String> {
 
     find_serialized_prop(parsed, "css")
         .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn selector_from_cached_oid(oid: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(oid).ok()?;
+    value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|id| id.strip_prefix("obscura-selector-"))
         .map(|s| s.to_string())
 }
 

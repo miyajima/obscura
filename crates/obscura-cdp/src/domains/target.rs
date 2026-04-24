@@ -136,6 +136,7 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
 
             Ok(json!({ "sessionId": session_id }))
         }
+        "attachToBrowserTarget" => Ok(json!({ "sessionId": "browser-session" })),
         "closeTarget" => {
             let target_id = params
                 .get("targetId")
