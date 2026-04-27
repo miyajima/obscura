@@ -17,6 +17,8 @@ pub struct CdpContext {
     page_counter: u32,
     pub preload_scripts: Vec<(String, String)>, // (identifier, source)
     pub preload_counter: u32,
+    pub isolated_world_names: HashMap<String, String>, // page_id -> world name
+    pub selector_results: HashMap<String, serde_json::Value>,
     pub fetch_intercept: FetchInterceptState,
     pub intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<InterceptedRequest>>,
 }
@@ -36,6 +38,8 @@ impl CdpContext {
             page_counter: 0,
             preload_scripts: Vec::new(),
             preload_counter: 0,
+            isolated_world_names: HashMap::new(),
+            selector_results: HashMap::new(),
             fetch_intercept: FetchInterceptState::new(),
             intercept_tx: None,
         }
@@ -64,9 +68,7 @@ impl CdpContext {
     }
 
     pub fn get_session_page(&self, session_id: &Option<String>) -> Option<&Page> {
-        let page_id = session_id
-            .as_ref()
-            .and_then(|sid| self.sessions.get(sid))?;
+        let page_id = session_id.as_ref().and_then(|sid| self.sessions.get(sid))?;
         self.get_page(page_id)
     }
 
@@ -118,9 +120,11 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         "Input" => domains::input::handle(method, &req.params, ctx, &req.session_id).await,
         "Storage" => domains::storage::handle(method, &req.params, ctx, &req.session_id).await,
         "LP" => domains::lp::handle(method, &req.params, ctx, &req.session_id).await,
+        "Accessibility" => {
+            domains::accessibility::handle(method, &req.params, ctx, &req.session_id).await
+        }
         "Emulation" | "Log" | "Performance" | "Security" | "CSS"
-        | "Accessibility" | "ServiceWorker" | "Inspector"
-        | "Debugger" | "Profiler" | "HeapProfiler" | "Overlay" => {
+        | "ServiceWorker" | "Inspector" | "Debugger" | "Profiler" | "HeapProfiler" | "Overlay" => {
             Ok(json!({}))
         }
         _ => Err(format!("Unknown domain: {}", domain)),

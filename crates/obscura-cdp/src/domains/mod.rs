@@ -1,4 +1,5 @@
 pub mod target;
+pub mod accessibility;
 pub mod browser;
 pub mod page;
 pub mod dom;
