@@ -69,8 +69,6 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
                 }
             }
 
-            ctx.sessions.insert(session_id.clone(), page_id.clone());
-
             if let Some(page) = ctx.get_page(&page_id) {
                 ctx.pending_events.push(CdpEvent::new(
                     "Target.targetCreated",
@@ -86,6 +84,8 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
                     }),
                 ));
             }
+
+            ctx.sessions.insert(session_id.clone(), page_id.clone());
 
             if let Some(page) = ctx.get_page(&page_id) {
                 ctx.pending_events.push(CdpEvent::new(
@@ -112,22 +112,61 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
                 .get("targetId")
                 .and_then(|v| v.as_str())
                 .ok_or("targetId required")?;
-            let session_id = format!("{}-session", target_id);
+            let existing_session_id = ctx
+                .sessions
+                .iter()
+                .find_map(|(session_id, page_id)| {
+                    if page_id == target_id {
+                        Some(session_id.clone())
+                    } else {
+                        None
+                    }
+                });
+            let session_id =
+                existing_session_id.unwrap_or_else(|| format!("{}-session", target_id));
+            let already_attached = ctx.sessions.contains_key(&session_id);
             ctx.sessions
                 .insert(session_id.clone(), target_id.to_string());
 
-            if let Some(page) = ctx.get_page(target_id) {
+            if !already_attached {
+                if let Some(page) = ctx.get_page(target_id) {
+                    ctx.pending_events.push(CdpEvent::new(
+                        "Target.attachedToTarget",
+                        json!({
+                            "sessionId": session_id,
+                            "targetInfo": {
+                                "targetId": target_id,
+                                "type": "page",
+                                "title": page.title,
+                                "url": page.url_string(),
+                                "attached": true,
+                                "browserContextId": page.context.id,
+                            },
+                            "waitingForDebugger": false,
+                        }),
+                    ));
+                }
+            }
+
+            Ok(json!({ "sessionId": session_id }))
+        }
+        "attachToBrowserTarget" => {
+            let session_id = "browser-session".to_string();
+            let already_attached = ctx.sessions.contains_key(&session_id);
+            ctx.sessions
+                .insert(session_id.clone(), "browser".to_string());
+            if !already_attached {
                 ctx.pending_events.push(CdpEvent::new(
                     "Target.attachedToTarget",
                     json!({
                         "sessionId": session_id,
                         "targetInfo": {
-                            "targetId": target_id,
-                            "type": "page",
-                            "title": page.title,
-                            "url": page.url_string(),
+                            "targetId": "browser",
+                            "type": "browser",
+                            "title": "",
+                            "url": "",
                             "attached": true,
-                            "browserContextId": page.context.id,
+                            "browserContextId": "",
                         },
                         "waitingForDebugger": false,
                     }),
@@ -136,7 +175,6 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
 
             Ok(json!({ "sessionId": session_id }))
         }
-        "attachToBrowserTarget" => Ok(json!({ "sessionId": "browser-session" })),
         "closeTarget" => {
             let target_id = params
                 .get("targetId")
@@ -250,5 +288,53 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
             }
         }
         _ => Err(format!("Unknown Target method: {}", method)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn attach_to_browser_target_returns_session_id_and_event() {
+        let mut ctx = CdpContext::new();
+        let result = handle("attachToBrowserTarget", &json!({}), &mut ctx)
+            .await
+            .expect("attachToBrowserTarget should succeed");
+
+        assert_eq!(result["sessionId"], "browser-session");
+        assert_eq!(
+            ctx.sessions.get("browser-session").map(String::as_str),
+            Some("browser")
+        );
+        let event = ctx
+            .pending_events
+            .iter()
+            .find(|event| event.method == "Target.attachedToTarget")
+            .expect("attachedToTarget event must be emitted");
+        assert_eq!(event.params["targetInfo"]["type"], "browser");
+    }
+
+    #[tokio::test]
+    async fn set_auto_attach_creates_and_attaches_page() {
+        let mut ctx = CdpContext::new();
+        let result = handle("setAutoAttach", &json!({}), &mut ctx)
+            .await
+            .expect("setAutoAttach should succeed");
+        assert_eq!(result, json!({}));
+        assert!(!ctx.pages.is_empty());
+        assert!(ctx
+            .pending_events
+            .iter()
+            .any(|event| event.method == "Target.attachedToTarget"));
+    }
+
+    #[tokio::test]
+    async fn unknown_target_method_still_errors() {
+        let mut ctx = CdpContext::new();
+        let err = handle("notARealMethod", &json!({}), &mut ctx)
+            .await
+            .expect_err("unknown methods must surface as errors");
+        assert!(err.contains("Unknown Target method"));
     }
 }

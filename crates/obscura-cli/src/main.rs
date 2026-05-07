@@ -5,9 +5,13 @@ use clap::{Parser, Subcommand};
 use obscura_browser::{BrowserContext, Page};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
+use tokio::time::{timeout, Duration};
 
 #[derive(Parser)]
-#[command(name = "obscura", about = "Obscura - A lightweight headless browser for web scraping and automation")]
+#[command(
+    name = "obscura",
+    about = "Obscura - A lightweight headless browser for web scraping and automation"
+)]
 struct Args {
     #[arg(short, long, global = true)]
     verbose: bool,
@@ -59,6 +63,9 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         wait: u64,
 
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: u64,
+
         #[arg(long, default_value = "load")]
         wait_until: String,
 
@@ -81,15 +88,16 @@ enum Command {
         #[arg(long, short)]
         eval: Option<String>,
 
-        #[arg(long, default_value_t = 10)]
-        concurrency: usize,
+        #[arg(long, default_value_t = std::num::NonZeroUsize::new(10).unwrap())]
+        concurrency: std::num::NonZeroUsize,
 
         #[arg(long, default_value = "json")]
         format: String,
+
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: u64,
     },
-
 }
-
 
 #[derive(Clone, Debug, clap::ValueEnum)]
 enum DumpFormat {
@@ -99,7 +107,8 @@ enum DumpFormat {
 }
 
 fn print_banner(port: u16) {
-    println!(r#"
+    println!(
+        r#"
    ____  _                              
   / __ \| |                             
  | |  | | |__  ___  ___ _   _ _ __ __ _ 
@@ -109,7 +118,9 @@ fn print_banner(port: u16) {
                    
   Headless Browser v0.1.1
   CDP server: ws://127.0.0.1:{}/devtools/browser
-"#, port);
+"#,
+        port
+    );
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -126,7 +137,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match args.command {
-        Some(Command::Serve { port, proxy, user_agent, stealth, workers }) => {
+        Some(Command::Serve {
+            port,
+            proxy,
+            user_agent,
+            stealth,
+            workers,
+        }) => {
             print_banner(port);
             if let Some(ref proxy) = proxy {
                 tracing::info!("Using proxy: {}", proxy);
@@ -137,27 +154,55 @@ async fn main() -> anyhow::Result<()> {
             if stealth {
                 tracing::info!("Stealth mode enabled (TLS fingerprint spoofing)");
             }
-            let _ = stealth;
 
             if workers > 1 {
                 tracing::info!("{} worker processes", workers);
-                run_multi_worker_serve(port, workers, proxy, stealth).await?;
+                run_multi_worker_serve(port, workers, proxy, stealth, user_agent).await?;
             } else {
-                obscura_cdp::start_with_options(port, proxy).await?;
+                obscura_cdp::start_with_full_options(port, proxy, stealth, user_agent).await?;
             }
         }
-        Some(Command::Fetch { url, dump, selector, wait, wait_until, user_agent, stealth, eval, quiet }) => {
-            run_fetch(&url, dump, selector, wait, &wait_until, user_agent, stealth, eval, quiet).await?;
+        Some(Command::Fetch {
+            url,
+            dump,
+            selector,
+            wait,
+            timeout,
+            wait_until,
+            user_agent,
+            stealth,
+            eval,
+            quiet,
+        }) => {
+            run_fetch(
+                &url,
+                dump,
+                selector,
+                wait,
+                timeout,
+                &wait_until,
+                user_agent,
+                stealth,
+                eval,
+                quiet,
+            )
+            .await?;
         }
-        Some(Command::Scrape { urls, eval, concurrency, format }) => {
-            run_parallel_scrape(urls, eval, concurrency, &format).await?;
+        Some(Command::Scrape {
+            urls,
+            eval,
+            concurrency,
+            format,
+            timeout,
+        }) => {
+            run_parallel_scrape(urls, eval, concurrency.get(), &format, timeout).await?;
         }
         None => {
             print_banner(args.port);
             if let Some(ref proxy) = args.proxy {
                 tracing::info!("Using proxy: {}", proxy);
             }
-            obscura_cdp::start_with_options(args.port, args.proxy).await?;
+            obscura_cdp::start_with_options(args.port, args.proxy, false).await?;
         }
     }
 
@@ -169,9 +214,10 @@ async fn run_multi_worker_serve(
     workers: u16,
     proxy: Option<String>,
     stealth: bool,
+    user_agent: Option<String>,
 ) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
     use tokio::net::TcpListener;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let exe = std::env::current_exe()?;
     let mut children = Vec::new();
@@ -182,6 +228,9 @@ async fn run_multi_worker_serve(
         cmd.arg("serve").arg("--port").arg(worker_port.to_string());
         if let Some(ref p) = proxy {
             cmd.arg("--proxy").arg(p);
+        }
+        if let Some(ref ua) = user_agent {
+            cmd.arg("--user-agent").arg(ua);
         }
         if stealth {
             cmd.arg("--stealth");
@@ -218,11 +267,25 @@ async fn run_multi_worker_serve(
             let request_line = String::from_utf8_lossy(&full_peek[..n]);
 
             if request_line.contains("/json") {
-                let worker_addr = format!("127.0.0.1:{}", port + 1);
-                if let Ok(mut worker_stream) = tokio::net::TcpStream::connect(&worker_addr).await {
-                    tokio::spawn(async move {
-                        let _ = tokio::io::copy_bidirectional(&mut tokio::net::TcpStream::from_std(client_stream.into_std().unwrap()).unwrap(), &mut worker_stream).await;
-                    });
+                let worker_addr = format!("127.0.0.1:{}", worker_port);
+                match tokio::net::TcpStream::connect(&worker_addr).await {
+                    Ok(mut worker_stream) => {
+                        tokio::spawn(async move {
+                            let mut client = client_stream;
+                            let _ = tokio::io::copy_bidirectional(&mut client, &mut worker_stream)
+                                .await;
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!("/json worker {} unreachable: {}", worker_addr, e);
+                        tokio::spawn(async move {
+                            let mut s = client_stream;
+                            let _ = s
+                                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                                .await;
+                            let _ = s.shutdown().await;
+                        });
+                    }
                 }
                 continue;
             }
@@ -230,9 +293,19 @@ async fn run_multi_worker_serve(
 
         let worker_addr = format!("127.0.0.1:{}", worker_port);
         tokio::spawn(async move {
-            if let Ok(mut worker_stream) = tokio::net::TcpStream::connect(&worker_addr).await {
-                let mut client = client_stream;
-                let _ = tokio::io::copy_bidirectional(&mut client, &mut worker_stream).await;
+            match tokio::net::TcpStream::connect(&worker_addr).await {
+                Ok(mut worker_stream) => {
+                    let mut client = client_stream;
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut worker_stream).await;
+                }
+                Err(e) => {
+                    tracing::warn!("worker {} unreachable: {}", worker_addr, e);
+                    let mut s = client_stream;
+                    let _ = s
+                        .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                        .await;
+                    let _ = s.shutdown().await;
+                }
             }
         });
     }
@@ -243,13 +316,18 @@ async fn run_fetch(
     dump: DumpFormat,
     selector: Option<String>,
     wait_secs: u64,
+    timeout_secs: u64,
     wait_until: &str,
     user_agent: Option<String>,
     stealth: bool,
     eval: Option<String>,
     quiet: bool,
 ) -> anyhow::Result<()> {
-    let context = Arc::new(BrowserContext::with_options("fetch".to_string(), None, stealth));
+    let context = Arc::new(BrowserContext::with_options(
+        "fetch".to_string(),
+        None,
+        stealth,
+    ));
     let mut page = Page::new("fetch-page".to_string(), context);
 
     if let Some(ref ua) = user_agent {
@@ -262,9 +340,21 @@ async fn run_fetch(
         eprintln!("Fetching {}...", url_str);
     }
 
-    page.navigate_with_wait(url_str, wait_condition).await.map_err(|e| {
-        anyhow::anyhow!("Failed to navigate to {}: {}", url_str, e)
-    })?;
+    match timeout(
+        Duration::from_secs(timeout_secs),
+        page.navigate_with_wait(url_str, wait_condition),
+    )
+    .await
+    {
+        Ok(result) => {
+            result.map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url_str, e))?
+        }
+        Err(_) => anyhow::bail!(
+            "Timed out navigating to {} after {}s",
+            url_str,
+            timeout_secs
+        ),
+    }
 
     if !quiet {
         eprintln!("Page loaded: {} - \"{}\"", page.url_string(), page.title);
@@ -305,9 +395,9 @@ async fn run_fetch(
 async fn wait_for_selector(page: &mut Page, selector: &str, timeout_secs: u64) -> bool {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
     loop {
-        let found = page.with_dom(|dom| {
-            dom.query_selector(selector).ok().flatten().is_some()
-        }).unwrap_or(false);
+        let found = page
+            .with_dom(|dom| dom.query_selector(selector).ok().flatten().is_some())
+            .unwrap_or(false);
 
         if found {
             return true;
@@ -364,12 +454,38 @@ fn extract_readable_text(dom: &obscura_dom::DomTree, node_id: obscura_dom::NodeI
             let tag = name.local.as_ref();
             let is_block = matches!(
                 tag,
-                "div" | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                    | "li" | "tr" | "br" | "hr" | "blockquote" | "pre"
-                    | "section" | "article" | "header" | "footer" | "nav"
-                    | "main" | "aside" | "figure" | "figcaption" | "table"
-                    | "thead" | "tbody" | "tfoot" | "dl" | "dt" | "dd"
-                    | "ul" | "ol"
+                "div"
+                    | "p"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "li"
+                    | "tr"
+                    | "br"
+                    | "hr"
+                    | "blockquote"
+                    | "pre"
+                    | "section"
+                    | "article"
+                    | "header"
+                    | "footer"
+                    | "nav"
+                    | "main"
+                    | "aside"
+                    | "figure"
+                    | "figcaption"
+                    | "table"
+                    | "thead"
+                    | "tbody"
+                    | "tfoot"
+                    | "dl"
+                    | "dt"
+                    | "dd"
+                    | "ul"
+                    | "ol"
             );
 
             if tag == "script" || tag == "style" {
@@ -403,13 +519,18 @@ async fn run_parallel_scrape(
     eval: Option<String>,
     concurrency: usize,
     format: &str,
+    timeout_secs: u64,
 ) -> anyhow::Result<()> {
     let total = urls.len();
     let start = Instant::now();
 
+    if total == 0 {
+        anyhow::bail!("No URLs provided. Pass at least one URL to scrape.");
+    }
+
     eprintln!(
-        "Scraping {} URLs with {} concurrent workers...",
-        total, concurrency
+        "Scraping {} URLs with {} concurrent workers (per-worker timeout: {}s)...",
+        total, concurrency, timeout_secs
     );
 
     let worker_path = std::env::current_exe()
@@ -427,6 +548,8 @@ async fn run_parallel_scrape(
     let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
     let eval = Arc::new(eval);
     let worker_path = Arc::new(worker_path);
+    let worker_timeout = Duration::from_secs(timeout_secs);
+    let read_timeout = Duration::from_secs(timeout_secs.min(30));
 
     let mut handles = Vec::new();
 
@@ -455,77 +578,104 @@ async fn run_parallel_scrape(
                 }
             };
 
-            let stdin = child.stdin.as_mut().unwrap();
+            let mut stdin = child.stdin.take().unwrap();
             let stdout = child.stdout.take().unwrap();
             let mut reader = BufReader::new(stdout);
 
-            let nav_cmd = serde_json::json!({"cmd": "navigate", "url": url});
-            let mut line = serde_json::to_string(&nav_cmd).unwrap();
-            line.push('\n');
-            if stdin.write_all(line.as_bytes()).await.is_err() {
-                let _ = child.kill().await;
-                return serde_json::json!({"url": url, "error": "Write failed"});
-            }
-            let _ = stdin.flush().await;
+            let worker_result: Result<serde_json::Value, String> =
+                match timeout(worker_timeout, async {
+                    let nav_cmd = serde_json::json!({"cmd": "navigate", "url": url});
+                    let mut line = serde_json::to_string(&nav_cmd).unwrap();
+                    line.push('\n');
+                    stdin
+                        .write_all(line.as_bytes())
+                        .await
+                        .map_err(|_| "Write failed".to_string())?;
+                    stdin
+                        .flush()
+                        .await
+                        .map_err(|_| "Write failed".to_string())?;
 
-            let mut resp_line = String::new();
-            if reader.read_line(&mut resp_line).await.is_err() {
-                let _ = child.kill().await;
-                return serde_json::json!({"url": url, "error": "Read failed"});
-            }
+                    let mut resp_line = String::new();
+                    match timeout(read_timeout, reader.read_line(&mut resp_line)).await {
+                        Ok(Ok(bytes)) if bytes > 0 => {}
+                        _ => return Err("Read failed".to_string()),
+                    }
 
-            let nav_resp: serde_json::Value =
-                serde_json::from_str(resp_line.trim()).unwrap_or(serde_json::json!({"ok": false}));
-
-            if !nav_resp["ok"].as_bool().unwrap_or(false) {
-                let _ = child.kill().await;
-                return serde_json::json!({
-                    "url": url,
-                    "error": nav_resp["error"].as_str().unwrap_or("navigate failed"),
-                    "time_ms": task_start.elapsed().as_millis(),
-                });
-            }
-
-            let title = nav_resp["result"]["title"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-
-            let eval_result = if let Some(ref expr) = *eval {
-                let eval_cmd = serde_json::json!({"cmd": "evaluate", "expression": expr});
-                let mut line = serde_json::to_string(&eval_cmd).unwrap();
-                line.push('\n');
-                let _ = stdin.write_all(line.as_bytes()).await;
-                let _ = stdin.flush().await;
-
-                let mut resp_line = String::new();
-                if reader.read_line(&mut resp_line).await.is_ok() {
-                    let resp: serde_json::Value = serde_json::from_str(resp_line.trim())
+                    let nav_resp: serde_json::Value = serde_json::from_str(resp_line.trim())
                         .unwrap_or(serde_json::json!({"ok": false}));
-                    resp["result"].clone()
-                } else {
-                    serde_json::Value::Null
+
+                    if !nav_resp["ok"].as_bool().unwrap_or(false) {
+                        return Err(nav_resp["error"]
+                            .as_str()
+                            .unwrap_or("navigate failed")
+                            .to_string());
+                    }
+
+                    let title = nav_resp["result"]["title"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+
+                    let eval_result = if let Some(ref expr) = *eval {
+                        let eval_cmd = serde_json::json!({"cmd": "evaluate", "expression": expr});
+                        let mut line = serde_json::to_string(&eval_cmd).unwrap();
+                        line.push('\n');
+                        stdin
+                            .write_all(line.as_bytes())
+                            .await
+                            .map_err(|_| "Write failed".to_string())?;
+                        stdin
+                            .flush()
+                            .await
+                            .map_err(|_| "Write failed".to_string())?;
+
+                        let mut resp_line = String::new();
+                        match timeout(read_timeout, reader.read_line(&mut resp_line)).await {
+                            Ok(Ok(bytes)) if bytes > 0 => {
+                                let resp: serde_json::Value =
+                                    serde_json::from_str(resp_line.trim())
+                                        .unwrap_or(serde_json::json!({"ok": false}));
+                                resp["result"].clone()
+                            }
+                            _ => return Err("Read failed".to_string()),
+                        }
+                    } else {
+                        serde_json::Value::Null
+                    };
+
+                    let shutdown_cmd = serde_json::json!({"cmd": "shutdown"});
+                    let mut line = serde_json::to_string(&shutdown_cmd).unwrap();
+                    line.push('\n');
+                    let _ = stdin.write_all(line.as_bytes()).await;
+                    let _ = stdin.flush().await;
+                    let _ = child.wait().await;
+
+                    Ok(serde_json::json!({
+                        "url": url,
+                        "title": title,
+                        "eval": eval_result,
+                        "time_ms": task_start.elapsed().as_millis(),
+                        "worker": i,
+                    }))
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err("timeout".to_string()),
+                };
+
+            match worker_result {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = child.kill().await;
+                    serde_json::json!({
+                        "url": url,
+                        "error": error,
+                        "time_ms": task_start.elapsed().as_millis(),
+                    })
                 }
-            } else {
-                serde_json::Value::Null
-            };
-
-            let shutdown_cmd = serde_json::json!({"cmd": "shutdown"});
-            let mut line = serde_json::to_string(&shutdown_cmd).unwrap();
-            line.push('\n');
-            let _ = stdin.write_all(line.as_bytes()).await;
-            let _ = stdin.flush().await;
-            let _ = child.wait().await;
-
-            let elapsed = task_start.elapsed().as_millis();
-
-            serde_json::json!({
-                "url": url,
-                "title": title,
-                "eval": eval_result,
-                "time_ms": elapsed,
-                "worker": i,
-            })
+            }
         });
 
         handles.push(handle);
@@ -586,7 +736,9 @@ fn dump_links(page: &Page) {
                 let full_url = if href.starts_with("http://") || href.starts_with("https://") {
                     href.clone()
                 } else if let Some(ref base) = base_url {
-                    base.join(&href).map(|u| u.to_string()).unwrap_or(href.clone())
+                    base.join(&href)
+                        .map(|u| u.to_string())
+                        .unwrap_or(href.clone())
                 } else {
                     href.clone()
                 };

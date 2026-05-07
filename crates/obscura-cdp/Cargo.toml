@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 obscura-dom = { workspace = true }
 obscura-browser = { workspace = true }
+obscura-render = { workspace = true }
 obscura-js = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

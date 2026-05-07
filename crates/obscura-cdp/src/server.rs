@@ -24,10 +24,23 @@ enum ServerMessage {
 }
 
 pub async fn start(port: u16) -> anyhow::Result<()> {
-    start_with_options(port, None).await
+    start_with_options(port, None, false).await
 }
 
-pub async fn start_with_options(port: u16, proxy: Option<String>) -> anyhow::Result<()> {
+pub async fn start_with_options(
+    port: u16,
+    proxy: Option<String>,
+    stealth: bool,
+) -> anyhow::Result<()> {
+    start_with_full_options(port, proxy, stealth, None).await
+}
+
+pub async fn start_with_full_options(
+    port: u16,
+    proxy: Option<String>,
+    stealth: bool,
+    user_agent: Option<String>,
+) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(&addr).await?;
 
@@ -42,7 +55,8 @@ pub async fn start_with_options(port: u16, proxy: Option<String>) -> anyhow::Res
         .run_until(async {
             let (msg_tx, msg_rx) = mpsc::unbounded_channel::<ServerMessage>();
 
-            let processor_handle = tokio::task::spawn_local(cdp_processor(msg_rx, proxy));
+            let processor_handle =
+                tokio::task::spawn_local(cdp_processor(msg_rx, proxy, stealth, user_agent));
 
             loop {
                 match listener.accept().await {
@@ -64,8 +78,13 @@ pub async fn start_with_options(port: u16, proxy: Option<String>) -> anyhow::Res
         .await
 }
 
-async fn cdp_processor(mut rx: mpsc::UnboundedReceiver<ServerMessage>, proxy: Option<String>) {
-    let mut ctx = CdpContext::new_with_proxy(proxy);
+async fn cdp_processor(
+    mut rx: mpsc::UnboundedReceiver<ServerMessage>,
+    proxy: Option<String>,
+    stealth: bool,
+    user_agent: Option<String>,
+) {
+    let mut ctx = CdpContext::new_with_full_options(proxy, stealth, user_agent);
     let (itx, irx) = mpsc::unbounded_channel::<obscura_js::ops::InterceptedRequest>();
     ctx.intercept_tx = Some(itx);
     let mut intercept_rx: Option<mpsc::UnboundedReceiver<obscura_js::ops::InterceptedRequest>> =
@@ -530,6 +549,14 @@ async fn process_cdp_message(
     );
 
     let response = dispatch::dispatch(&req, ctx).await;
+    let screencast_seed = if req.method == "Page.startScreencast" {
+        ctx.pending_events
+            .iter()
+            .find(|event| event.method == "Page.screencastFrame")
+            .map(|event| (event.params.clone(), event.session_id.clone()))
+    } else {
+        None
+    };
 
     // Playwright collects navigation side-effect events only while the CDP
     // command is in flight. Send these events before the response so callers
@@ -538,11 +565,13 @@ async fn process_cdp_message(
         req.method.as_str(),
         "Target.createTarget"
             | "Target.attachToTarget"
+            | "Target.attachToBrowserTarget"
             | "Target.setAutoAttach"
             | "Runtime.enable"
             | "Page.addScriptToEvaluateOnNewDocument"
             | "Page.createIsolatedWorld"
             | "Page.navigate"
+            | "Page.startScreencast"
     );
 
     if events_first {
@@ -584,6 +613,41 @@ async fn process_cdp_message(
                 let _ = reply_tx.send(json);
             }
         }
+    }
+
+    if let Some((params, event_session_id)) = screencast_seed {
+        let tx = reply_tx.clone();
+        let active_screencasts = ctx.active_screencasts.clone();
+        tokio::task::spawn_local(async move {
+            let base_session_id = params
+                .get("sessionId")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1);
+            for offset in 1..=4 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+                let is_active = active_screencasts
+                    .lock()
+                    .map(|active| active.contains(&base_session_id))
+                    .unwrap_or(false);
+                if !is_active {
+                    break;
+                }
+                let mut frame_params = params.clone();
+                frame_params["sessionId"] = json!(base_session_id + offset);
+                frame_params["metadata"]["timestamp"] = json!(std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64());
+                let event = crate::types::CdpEvent {
+                    method: "Page.screencastFrame".to_string(),
+                    params: frame_params,
+                    session_id: event_session_id.clone(),
+                };
+                if let Ok(json) = serde_json::to_string(&event) {
+                    let _ = tx.send(json);
+                }
+            }
+        });
     }
 }
 

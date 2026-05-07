@@ -34,6 +34,7 @@ pub struct Page {
     pub http_client: Arc<ObscuraHttpClient>,
     pub context: Arc<BrowserContext>,
     pub title: String,
+    pub css_sources: Vec<String>,
     pub network_events: Vec<NetworkEvent>,
     network_event_counter: u32,
     pub intercept_enabled: bool,
@@ -68,6 +69,7 @@ impl Page {
             http_client,
             context,
             title: String::new(),
+            css_sources: Vec::new(),
             network_events: Vec::new(),
             network_event_counter: 0,
             intercept_enabled: false,
@@ -550,6 +552,7 @@ impl Page {
         }
 
         self.dom = Some(dom);
+        self.css_sources = css_sources.clone();
         self.lifecycle = LifecycleState::DomContentLoaded;
 
         if wait_until == crate::lifecycle::WaitUntil::DomContentLoaded {
@@ -641,6 +644,7 @@ impl Page {
         self.url = Some(Url::parse("about:blank").unwrap());
         self.dom = Some(parse_html("<!DOCTYPE html><html><head></head><body></body></html>"));
         self.title = String::new();
+        self.css_sources.clear();
         self.lifecycle = LifecycleState::Loaded;
     }
 

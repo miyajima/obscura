@@ -1,0 +1,10 @@
+[package]
+name = "obscura-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+obscura-dom = { workspace = true }
+base64 = { workspace = true }
+image = { workspace = true }
+url = { workspace = true }

@@ -86,13 +86,8 @@ pub async fn handle(
 
             let es = session_id.clone();
             let ts = timestamp();
-            let isolated_world_name = ctx
-                .isolated_world_names
-                .get(&page_id)
-                .cloned()
-                .unwrap_or_default();
 
-            let phase1 = vec![
+            let mut phase1 = vec![
                 CdpEvent {
                     method: "Page.lifecycleEvent".into(),
                     params: json!({"frameId": frame_id, "loaderId": loader_id, "name": "init", "timestamp": ts}),
@@ -113,17 +108,31 @@ pub async fn handle(
                     params: json!({"context": {"id": 2, "origin": page_url, "name": "", "uniqueId": format!("ctx-nav-{}", page_id), "auxData": {"isDefault": true, "type": "default", "frameId": frame_id}}}),
                     session_id: es.clone(),
                 },
-                CdpEvent {
-                    method: "Runtime.executionContextCreated".into(),
-                    params: json!({"context": {"id": 100, "origin": page_url, "name": isolated_world_name, "uniqueId": format!("ctx-isolated-nav-{}", page_id), "auxData": {"isDefault": false, "type": "isolated", "frameId": frame_id}}}),
-                    session_id: es.clone(),
-                },
-                CdpEvent {
-                    method: "Page.lifecycleEvent".into(),
-                    params: json!({"frameId": frame_id, "loaderId": loader_id, "name": "commit", "timestamp": ts}),
-                    session_id: es.clone(),
-                },
             ];
+
+            let world_names: Vec<String> = if ctx.isolated_worlds.is_empty() {
+                ctx.isolated_world_names
+                    .get(&page_id)
+                    .cloned()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| vec![s])
+                    .unwrap_or_else(|| vec!["__puppeteer_utility_world__24.40.0".to_string()])
+            } else {
+                ctx.isolated_worlds.clone()
+            };
+            for (idx, world_name) in world_names.iter().enumerate() {
+                let world_ctx_id = 100 + idx as u32;
+                phase1.push(CdpEvent {
+                    method: "Runtime.executionContextCreated".into(),
+                    params: json!({"context": {"id": world_ctx_id, "origin": page_url, "name": world_name, "uniqueId": format!("ctx-isolated-nav-{}-{}", page_id, idx), "auxData": {"isDefault": false, "type": "isolated", "frameId": frame_id}}}),
+                    session_id: es.clone(),
+                });
+            }
+            phase1.push(CdpEvent {
+                method: "Page.lifecycleEvent".into(),
+                params: json!({"frameId": frame_id, "loaderId": loader_id, "name": "commit", "timestamp": ts}),
+                session_id: es.clone(),
+            });
             ctx.pending_events.extend(phase1);
 
             if ctx.fetch_intercept.enabled {
@@ -243,6 +252,9 @@ pub async fn handle(
             if !world_name.is_empty() {
                 ctx.isolated_world_names
                     .insert(page_id.clone(), world_name.clone());
+                if !ctx.isolated_worlds.contains(&world_name) {
+                    ctx.isolated_worlds.push(world_name.clone());
+                }
             }
 
             ctx.pending_events.push(CdpEvent {
@@ -290,6 +302,9 @@ pub async fn handle(
                 {
                     ctx.isolated_world_names
                         .insert(page_id.clone(), world_name.to_string());
+                    if !ctx.isolated_worlds.iter().any(|name| name == world_name) {
+                        ctx.isolated_worlds.push(world_name.to_string());
+                    }
                     ctx.pending_events.push(CdpEvent {
                         method: "Runtime.executionContextCreated".to_string(),
                         params: json!({
@@ -321,6 +336,87 @@ pub async fn handle(
             Ok(json!({}))
         }
         "setInterceptFileChooserDialog" => Ok(json!({})),
+        "getLayoutMetrics" => {
+            let width = 1280.0_f64;
+            let height = 720.0_f64;
+            let content_height = ctx
+                .get_session_page_mut(session_id)
+                .map(|p| {
+                    p.evaluate("document.documentElement && document.documentElement.scrollHeight")
+                })
+                .and_then(|v| v.as_f64())
+                .filter(|n| *n > 0.0)
+                .unwrap_or(height);
+            let layout_viewport = json!({
+                "pageX": 0, "pageY": 0,
+                "clientWidth": width, "clientHeight": height,
+            });
+            let visual_viewport = json!({
+                "offsetX": 0.0, "offsetY": 0.0,
+                "pageX": 0.0, "pageY": 0.0,
+                "clientWidth": width, "clientHeight": height,
+                "scale": 1.0, "zoom": 1.0,
+            });
+            let content_size = json!({
+                "x": 0.0, "y": 0.0,
+                "width": width, "height": content_height,
+            });
+            Ok(json!({
+                "layoutViewport": layout_viewport,
+                "visualViewport": visual_viewport,
+                "contentSize": content_size,
+                "cssLayoutViewport": layout_viewport,
+                "cssVisualViewport": visual_viewport,
+                "cssContentSize": content_size,
+            }))
+        }
+        "captureScreenshot" => {
+            let page = ctx
+                .get_session_page(session_id)
+                .or_else(|| ctx.pages.first())
+                .ok_or("No page for session")?;
+            let data = crate::media_capture::capture_page(page, params)?;
+            Ok(json!({ "data": data }))
+        }
+        "startScreencast" => {
+            let page = ctx
+                .get_session_page(session_id)
+                .or_else(|| ctx.pages.first())
+                .ok_or("No page for session")?;
+            let data = crate::media_capture::capture_page_for_screencast(page, params)?;
+            let screencast_session_id = ctx.screencast_next_session_id;
+            ctx.screencast_next_session_id += 1;
+            ctx.active_screencasts
+                .lock()
+                .map(|mut active| {
+                    active.clear();
+                    active.insert(screencast_session_id);
+                })
+                .ok();
+            ctx.pending_events.push(CdpEvent {
+                method: "Page.screencastFrame".to_string(),
+                params: json!({
+                    "data": data,
+                    "metadata": {
+                        "offsetTop": 0,
+                        "pageScaleFactor": 1,
+                        "deviceWidth": 1280,
+                        "deviceHeight": 720,
+                        "scrollOffsetX": 0,
+                        "scrollOffsetY": 0,
+                        "timestamp": timestamp(),
+                    },
+                    "sessionId": screencast_session_id,
+                }),
+                session_id: session_id.clone(),
+            });
+            Ok(json!({}))
+        }
+        "screencastFrameAck" => Ok(json!({})),
+        "stopScreencast" => {
+            ctx.active_screencasts.lock().map(|mut active| active.clear()).ok();
+            Ok(json!({}))
+        }
         "getNavigationHistory" => {
             let page = ctx
                 .get_session_page(session_id)
@@ -345,4 +441,87 @@ fn timestamp() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dispatch::CdpContext;
+
+    #[tokio::test]
+    async fn get_layout_metrics_returns_chrome_default_viewport() {
+        let mut ctx = CdpContext::new();
+        let result = handle("getLayoutMetrics", &json!({}), &mut ctx, &None)
+            .await
+            .expect("getLayoutMetrics should succeed without a session");
+
+        for key in [
+            "layoutViewport",
+            "visualViewport",
+            "contentSize",
+            "cssLayoutViewport",
+            "cssVisualViewport",
+            "cssContentSize",
+        ] {
+            assert!(result.get(key).is_some(), "missing key: {key}");
+        }
+        assert_eq!(
+            result["layoutViewport"]["clientWidth"].as_f64(),
+            Some(1280.0)
+        );
+        assert_eq!(result["contentSize"]["height"].as_f64(), Some(720.0));
+    }
+
+    #[tokio::test]
+    async fn capture_screenshot_returns_base64_data() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session_id = format!("{}-session", page_id);
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let result = handle(
+            "captureScreenshot",
+            &json!({ "format": "png" }),
+            &mut ctx,
+            &Some(session_id),
+        )
+        .await
+        .expect("captureScreenshot should succeed");
+        assert!(result["data"].as_str().unwrap_or("").starts_with("iVBOR"));
+    }
+
+    #[tokio::test]
+    async fn start_screencast_queues_frame_event() {
+        let mut ctx = CdpContext::new();
+        let page_id = ctx.create_page();
+        let session_id = format!("{}-session", page_id);
+        ctx.sessions.insert(session_id.clone(), page_id);
+
+        let result = handle("startScreencast", &json!({}), &mut ctx, &Some(session_id))
+            .await
+            .expect("startScreencast should succeed in stub mode");
+        assert_eq!(result, json!({}));
+        assert!(ctx
+            .pending_events
+            .iter()
+            .any(|event| event.method == "Page.screencastFrame"));
+    }
+
+    #[tokio::test]
+    async fn stop_screencast_is_acknowledged() {
+        let mut ctx = CdpContext::new();
+        let result = handle("stopScreencast", &json!({}), &mut ctx, &None)
+            .await
+            .expect("stopScreencast should be acknowledged");
+        assert_eq!(result, json!({}));
+    }
+
+    #[tokio::test]
+    async fn unknown_page_method_still_errors() {
+        let mut ctx = CdpContext::new();
+        let err = handle("notARealMethod", &json!({}), &mut ctx, &None)
+            .await
+            .expect_err("unknown methods must surface as errors");
+        assert!(err.contains("Unknown Page method"));
+    }
 }

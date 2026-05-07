@@ -4,6 +4,7 @@ members = [
     "crates/obscura-dom",
     "crates/obscura-net",
     "crates/obscura-browser",
+    "crates/obscura-render",
     "crates/obscura-cdp",
     "crates/obscura-js",
     "crates/obscura-cli",
@@ -19,6 +20,7 @@ repository = "https://github.com/h4ckf0r0day/obscura"
 obscura-dom = { path = "crates/obscura-dom" }
 obscura-net = { path = "crates/obscura-net" }
 obscura-browser = { path = "crates/obscura-browser" }
+obscura-render = { path = "crates/obscura-render" }
 obscura-cdp = { path = "crates/obscura-cdp" }
 obscura-js = { path = "crates/obscura-js" }
 
@@ -39,3 +41,5 @@ clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 anyhow = "1"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
