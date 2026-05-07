@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use obscura_browser::{BrowserContext, Page};
-use obscura_js::ops::{InterceptResolution, InterceptedRequest};
+use obscura_js::ops::InterceptedRequest;
 use serde_json::json;
 
 use crate::domains;
@@ -117,6 +117,12 @@ impl CdpContext {
         }
 
         self.get_page_mut(&page_id)
+    }
+}
+
+impl Default for CdpContext {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -112,16 +112,13 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
                 .get("targetId")
                 .and_then(|v| v.as_str())
                 .ok_or("targetId required")?;
-            let existing_session_id = ctx
-                .sessions
-                .iter()
-                .find_map(|(session_id, page_id)| {
-                    if page_id == target_id {
-                        Some(session_id.clone())
-                    } else {
-                        None
-                    }
-                });
+            let existing_session_id = ctx.sessions.iter().find_map(|(session_id, page_id)| {
+                if page_id == target_id {
+                    Some(session_id.clone())
+                } else {
+                    None
+                }
+            });
             let session_id =
                 existing_session_id.unwrap_or_else(|| format!("{}-session", target_id));
             let already_attached = ctx.sessions.contains_key(&session_id);

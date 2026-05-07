@@ -15,7 +15,6 @@ struct CookieEntry {
     secure: bool,
     http_only: bool,
     expires: Option<u64>,
-    same_site: String,
 }
 
 impl CookieJar {
@@ -38,8 +37,6 @@ impl CookieJar {
         let mut secure = false;
         let mut http_only = false;
         let mut expires: Option<u64> = None;
-        let mut same_site = "Lax".to_string();
-
         if parts.len() > 1 {
             for attr in parts[1].split(';') {
                 let attr = attr.trim();
@@ -68,9 +65,6 @@ impl CookieJar {
                                     expires = Some(now + secs as u64);
                                 }
                             }
-                        }
-                        "samesite" => {
-                            same_site = val.trim().to_string();
                         }
                         _ => {}
                     }
@@ -109,7 +103,6 @@ impl CookieJar {
             secure,
             http_only,
             expires,
-            same_site,
         };
 
         let mut cookies = self.cookies.write().unwrap();
@@ -181,9 +174,10 @@ impl CookieJar {
                 secure: cookie.secure,
                 http_only: cookie.http_only,
                 expires: None,
-                same_site: "Lax".to_string(),
             };
-            jar.entry(cookie.domain).or_default().insert(cookie.name, entry);
+            jar.entry(cookie.domain)
+                .or_default()
+                .insert(cookie.name, entry);
         }
     }
 
@@ -238,8 +232,6 @@ impl CookieJar {
         let mut path = url.path().to_string();
         let mut secure = false;
         let mut expires: Option<u64> = None;
-        let mut same_site = "Lax".to_string();
-
         if parts.len() > 1 {
             for attr in parts[1].split(';') {
                 let attr = attr.trim();
@@ -269,15 +261,11 @@ impl CookieJar {
                                 }
                             }
                         }
-                        "samesite" => {
-                            same_site = val.trim().to_string();
-                        }
                         _ => {}
                     }
                 } else {
-                    match attr.to_lowercase().as_str() {
-                        "secure" => secure = true,
-                        _ => {}
+                    if attr.eq_ignore_ascii_case("secure") {
+                        secure = true;
                     }
                 }
             }
@@ -308,7 +296,6 @@ impl CookieJar {
             secure,
             http_only: false,
             expires,
-            same_site,
         };
 
         let mut cookies = self.cookies.write().unwrap();
@@ -358,16 +345,23 @@ pub struct CookieInfo {
 }
 
 fn parse_http_date(s: &str) -> Result<u64, ()> {
-    let months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    let months = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
 
     let s = s.replace('-', " ");
     let parts: Vec<&str> = s.split_whitespace().collect();
 
-    if parts.len() < 5 { return Err(()); }
+    if parts.len() < 5 {
+        return Err(());
+    }
 
     let day: u64 = parts[1].parse().map_err(|_| ())?;
-    let month = months.iter().position(|m| parts[2].to_lowercase().starts_with(m))
-        .ok_or(())? as u64 + 1;
+    let month = months
+        .iter()
+        .position(|m| parts[2].to_lowercase().starts_with(m))
+        .ok_or(())? as u64
+        + 1;
     let year: u64 = parts[3].parse().map_err(|_| ())?;
 
     let time_parts: Vec<&str> = parts[4].split(':').collect();
@@ -377,10 +371,14 @@ fn parse_http_date(s: &str) -> Result<u64, ()> {
 
     let mut days_total: u64 = 0;
     for y in 1970..year {
-        days_total += if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        days_total += if y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400)) {
+            366
+        } else {
+            365
+        };
     }
     let days_in_month = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let is_leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
     for m in 1..month {
         days_total += days_in_month[m as usize] + if m == 2 && is_leap { 1 } else { 0 };
     }

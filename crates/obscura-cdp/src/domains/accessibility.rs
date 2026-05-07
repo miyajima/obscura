@@ -39,9 +39,10 @@ pub fn aria_snapshot_for_page(page: &Page, selector: &str) -> Option<String> {
         let root = if selector == ":root" {
             document_element(dom).unwrap_or_else(|| dom.document())
         } else {
-            dom.query_selector(selector).ok().flatten().unwrap_or_else(|| {
-                document_element(dom).unwrap_or_else(|| dom.document())
-            })
+            dom.query_selector(selector)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| document_element(dom).unwrap_or_else(|| dom.document()))
         };
 
         let mut lines = Vec::new();
@@ -231,7 +232,8 @@ fn ax_properties(node: &Node, role: &str) -> Vec<Value> {
             "value": { "type": "integer", "value": level }
         }));
     }
-    if node.get_attribute("disabled").is_some() || node.get_attribute("aria-disabled") == Some("true")
+    if node.get_attribute("disabled").is_some()
+        || node.get_attribute("aria-disabled") == Some("true")
     {
         properties.push(json!({
             "name": "disabled",

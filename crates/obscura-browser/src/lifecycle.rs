@@ -31,7 +31,7 @@ pub enum WaitUntil {
 }
 
 impl WaitUntil {
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_cdp_str(s: &str) -> Self {
         match s {
             "domcontentloaded" => WaitUntil::DomContentLoaded,
             "networkidle0" | "networkIdle" | "networkidle" => WaitUntil::NetworkIdle0,

@@ -174,18 +174,18 @@ async fn main() -> anyhow::Result<()> {
             eval,
             quiet,
         }) => {
-            run_fetch(
-                &url,
+            run_fetch(FetchRunOptions {
+                url: url.as_str(),
                 dump,
                 selector,
-                wait,
-                timeout,
-                &wait_until,
+                wait_secs: wait,
+                timeout_secs: timeout,
+                wait_until: wait_until.as_str(),
                 user_agent,
                 stealth,
                 eval,
                 quiet,
-            )
+            })
             .await?;
         }
         Some(Command::Scrape {
@@ -311,63 +311,68 @@ async fn run_multi_worker_serve(
     }
 }
 
-async fn run_fetch(
-    url_str: &str,
+struct FetchRunOptions<'a> {
+    url: &'a str,
     dump: DumpFormat,
     selector: Option<String>,
     wait_secs: u64,
     timeout_secs: u64,
-    wait_until: &str,
+    wait_until: &'a str,
     user_agent: Option<String>,
     stealth: bool,
     eval: Option<String>,
     quiet: bool,
-) -> anyhow::Result<()> {
+}
+
+async fn run_fetch(options: FetchRunOptions<'_>) -> anyhow::Result<()> {
     let context = Arc::new(BrowserContext::with_options(
         "fetch".to_string(),
         None,
-        stealth,
+        options.stealth,
     ));
     let mut page = Page::new("fetch-page".to_string(), context);
 
-    if let Some(ref ua) = user_agent {
+    if let Some(ref ua) = options.user_agent {
         page.http_client.set_user_agent(ua).await;
     }
 
-    let wait_condition = obscura_browser::lifecycle::WaitUntil::from_str(wait_until);
+    let wait_condition = obscura_browser::lifecycle::WaitUntil::from_cdp_str(options.wait_until);
 
-    if !quiet {
-        eprintln!("Fetching {}...", url_str);
+    if !options.quiet {
+        eprintln!("Fetching {}...", options.url);
     }
 
     match timeout(
-        Duration::from_secs(timeout_secs),
-        page.navigate_with_wait(url_str, wait_condition),
+        Duration::from_secs(options.timeout_secs),
+        page.navigate_with_wait(options.url, wait_condition),
     )
     .await
     {
         Ok(result) => {
-            result.map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url_str, e))?
+            result.map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", options.url, e))?
         }
         Err(_) => anyhow::bail!(
             "Timed out navigating to {} after {}s",
-            url_str,
-            timeout_secs
+            options.url,
+            options.timeout_secs
         ),
     }
 
-    if !quiet {
+    if !options.quiet {
         eprintln!("Page loaded: {} - \"{}\"", page.url_string(), page.title);
     }
 
-    if let Some(ref sel) = selector {
-        let found = wait_for_selector(&mut page, sel, wait_secs).await;
+    if let Some(ref sel) = options.selector {
+        let found = wait_for_selector(&mut page, sel, options.wait_secs).await;
         if !found {
-            eprintln!("Warning: selector '{}' not found after {}s", sel, wait_secs);
+            eprintln!(
+                "Warning: selector '{}' not found after {}s",
+                sel, options.wait_secs
+            );
         }
     }
 
-    if let Some(ref expr) = eval {
+    if let Some(ref expr) = options.eval {
         let result = page.evaluate(expr);
         match result {
             serde_json::Value::String(s) => println!("{}", s),
@@ -377,7 +382,7 @@ async fn run_fetch(
         return Ok(());
     }
 
-    match dump {
+    match options.dump {
         DumpFormat::Html => {
             dump_html(&page);
         }

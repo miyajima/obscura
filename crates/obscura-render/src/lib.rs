@@ -287,10 +287,12 @@ impl Raster {
             for ch in word.chars() {
                 self.draw_pseudo_glyph(
                     ch,
-                    cx,
-                    cy,
-                    glyph_w,
-                    glyph_h,
+                    Rect {
+                        x: cx,
+                        y: cy,
+                        w: glyph_w,
+                        h: glyph_h,
+                    },
                     style.color,
                     style.font_weight,
                 );
@@ -301,39 +303,30 @@ impl Raster {
         cy + line_h
     }
 
-    fn draw_pseudo_glyph(
-        &mut self,
-        ch: char,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        color: Color,
-        weight: u16,
-    ) {
+    fn draw_pseudo_glyph(&mut self, ch: char, rect: Rect, color: Color, weight: u16) {
         if ch.is_whitespace() {
             return;
         }
         let cols = 5;
         let rows = 7;
-        let cell_w = (w / cols as f32).max(1.0);
-        let cell_h = (h / rows as f32).max(1.0);
+        let cell_w = (rect.w / cols as f32).max(1.0);
+        let cell_h = (rect.h / rows as f32).max(1.0);
         let mut seed = ch as u32;
         for row in 0..rows {
             for col in 0..cols {
                 seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                 let border = row == 0 || row == rows - 1 || col == 0 || col == cols - 1;
                 let on = if ch.is_ascii_alphanumeric() {
-                    border || seed % 5 == 0
+                    border || seed.is_multiple_of(5)
                 } else {
-                    seed % 3 != 0
+                    !seed.is_multiple_of(3)
                 };
                 if on {
                     let bold = if weight >= 600 { 1.25 } else { 1.0 };
                     self.fill_rect(
                         Rect {
-                            x: x + col as f32 * cell_w,
-                            y: y + row as f32 * cell_h,
+                            x: rect.x + col as f32 * cell_w,
+                            y: rect.y + row as f32 * cell_h,
                             w: (cell_w * bold).max(1.0),
                             h: cell_h.max(1.0),
                         },

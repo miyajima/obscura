@@ -176,21 +176,20 @@ pub async fn handle(
         }
         "addBinding" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if !name.is_empty() {
-                if name
+            if !name.is_empty()
+                && name
                     .chars()
                     .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-                    && !name.chars().next().unwrap_or('0').is_ascii_digit()
-                {
-                    if let Some(page) = ctx.get_session_page_mut(session_id) {
-                        let code = format!(
-                            "if (typeof globalThis.{name} === 'undefined') {{\
-                                globalThis.{name} = function() {{ return null; }};\
-                            }}",
-                            name = name,
-                        );
-                        page.evaluate(&code);
-                    }
+                && !name.chars().next().unwrap_or('0').is_ascii_digit()
+            {
+                if let Some(page) = ctx.get_session_page_mut(session_id) {
+                    let code = format!(
+                        "if (typeof globalThis.{name} === 'undefined') {{\
+                            globalThis.{name} = function() {{ return null; }};\
+                        }}",
+                        name = name,
+                    );
+                    page.evaluate(&code);
                 }
             }
             Ok(json!({}))
@@ -350,7 +349,9 @@ fn try_playwright_selector_call(
         }));
     }
 
-    if !callback_text.contains("element.textContent") && !expression_text.contains("element.textContent") {
+    if !callback_text.contains("element.textContent")
+        && !expression_text.contains("element.textContent")
+    {
         return None;
     }
 

@@ -22,11 +22,11 @@ pub async fn handle(
                 .get("waitUntil")
                 .and_then(|v| {
                     if let Some(s) = v.as_str() {
-                        Some(WaitUntil::from_str(s))
+                        Some(WaitUntil::from_cdp_str(s))
                     } else if let Some(arr) = v.as_array() {
                         arr.iter()
                             .filter_map(|item| item.as_str())
-                            .map(WaitUntil::from_str)
+                            .map(WaitUntil::from_cdp_str)
                             .max_by_key(|w| match w {
                                 WaitUntil::DomContentLoaded => 0,
                                 WaitUntil::Load => 1,
@@ -414,7 +414,10 @@ pub async fn handle(
         }
         "screencastFrameAck" => Ok(json!({})),
         "stopScreencast" => {
-            ctx.active_screencasts.lock().map(|mut active| active.clear()).ok();
+            ctx.active_screencasts
+                .lock()
+                .map(|mut active| active.clear())
+                .ok();
             Ok(json!({}))
         }
         "getNavigationHistory" => {

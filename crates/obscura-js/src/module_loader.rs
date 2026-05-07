@@ -21,7 +21,7 @@ impl ObscuraModuleLoader {
 }
 
 fn io_err(msg: String) -> ModuleLoaderError {
-    std::io::Error::new(std::io::ErrorKind::Other, msg).into()
+    std::io::Error::other(msg).into()
 }
 
 impl ModuleLoader for ObscuraModuleLoader {
@@ -75,9 +75,10 @@ impl ModuleLoader for ObscuraModuleLoader {
                 )));
             }
 
-            let code = resp.text().await.map_err(|e| {
-                io_err(format!("Failed to read module body {}: {}", url, e))
-            })?;
+            let code = resp
+                .text()
+                .await
+                .map_err(|e| io_err(format!("Failed to read module body {}: {}", url, e)))?;
 
             let specifier = ModuleSpecifier::parse(&url)
                 .map_err(|e| io_err(format!("Invalid module URL {}: {}", url, e)))?;
