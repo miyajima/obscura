@@ -683,8 +683,7 @@ fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
     if let Some(host) = url.host() {
         match host {
             url::Host::Ipv4(ip) => {
-                if ip.is_loopback()
-                    || ip.is_private()
+                if ip.is_private()
                     || ip.is_link_local()
                     || ip.is_broadcast()
                     || ip.is_documentation()
@@ -696,7 +695,7 @@ fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
                 }
             }
             url::Host::Ipv6(ip) => {
-                if ip.is_loopback() || ip.is_unicast_link_local() {
+                if ip.is_unicast_link_local() {
                     return Err(format!(
                         "Access to private/internal IPv6 address {} is not allowed",
                         ip
@@ -710,16 +709,41 @@ fn validate_fetch_url(url: &url::Url) -> Result<(), String> {
                     || lower_domain == "127.0.0.1"
                     || lower_domain == "::1"
                 {
-                    return Err(format!(
-                        "Access to localhost domain '{}' is not allowed",
-                        domain
-                    ));
+                    return Ok(());
                 }
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(url: &str) -> url::Url {
+        url::Url::parse(url).unwrap()
+    }
+
+    #[test]
+    fn validate_fetch_url_allows_loopback_targets() {
+        for url in [
+            "http://localhost:5173/",
+            "http://app.localhost:5173/",
+            "http://127.0.0.1:5173/",
+            "http://[::1]:5173/",
+        ] {
+            assert!(validate_fetch_url(&parsed(url)).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn validate_fetch_url_keeps_private_network_targets_blocked() {
+        for url in ["http://10.0.0.1/", "http://192.168.1.10/"] {
+            assert!(validate_fetch_url(&parsed(url)).is_err(), "{url}");
+        }
+    }
 }
 
 #[op2]

@@ -75,8 +75,7 @@ fn validate_url(url: &Url) -> Result<(), ObscuraNetError> {
     if let Some(host) = url.host() {
         match host {
             url::Host::Ipv4(ip) => {
-                if ip.is_loopback()
-                    || ip.is_private()
+                if ip.is_private()
                     || ip.is_link_local()
                     || ip.is_broadcast()
                     || ip.is_documentation()
@@ -88,7 +87,7 @@ fn validate_url(url: &Url) -> Result<(), ObscuraNetError> {
                 }
             }
             url::Host::Ipv6(ip) => {
-                if ip.is_loopback() || ip.is_unicast_link_local() {
+                if ip.is_unicast_link_local() {
                     return Err(ObscuraNetError::Network(format!(
                         "Access to private/internal IPv6 address {} is not allowed",
                         ip
@@ -102,10 +101,7 @@ fn validate_url(url: &Url) -> Result<(), ObscuraNetError> {
                     || lower_domain == "127.0.0.1"
                     || lower_domain == "::1"
                 {
-                    return Err(ObscuraNetError::Network(format!(
-                        "Access to localhost domain '{}' is not allowed",
-                        domain
-                    )));
+                    return Ok(());
                 }
             }
         }
@@ -415,6 +411,34 @@ impl ObscuraHttpClient {
 impl Default for ObscuraHttpClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(url: &str) -> Url {
+        Url::parse(url).unwrap()
+    }
+
+    #[test]
+    fn validate_url_allows_loopback_targets() {
+        for url in [
+            "http://localhost:3000/",
+            "http://app.localhost:3000/",
+            "http://127.0.0.1:3000/",
+            "http://[::1]:3000/",
+        ] {
+            assert!(validate_url(&parsed(url)).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn validate_url_keeps_private_network_targets_blocked() {
+        for url in ["http://10.0.0.1/", "http://192.168.1.10/"] {
+            assert!(validate_url(&parsed(url)).is_err(), "{url}");
+        }
     }
 }
 
